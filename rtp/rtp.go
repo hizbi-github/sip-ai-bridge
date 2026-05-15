@@ -37,16 +37,17 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 		return nil, err
 	}
 
-	ws, err := ws.CreateWebSocket()
-	if err != nil {
-		return nil, err
-	}
+	//ws, err := ws.CreateWebSocket()
+	//if err != nil {
+	//	return nil, err
+	//}
 
 	rtpListener := RtpListener{
 		RemoteAddr: remoteAddr,
 		LocalAddr:  localAddr,
 		Udp:        udpSocket,
-		Ws:         ws,
+		Ws:         nil,
+		//Ws:         ws,
 	}
 
 	return &rtpListener, nil
@@ -59,7 +60,7 @@ func DeleteRtpListener(callId string) error {
 	}
 
 	Listeners[callId].Udp.Close()
-	ws.DeleteWebSocket(Listeners[callId].Ws)
+	//ws.DeleteWebSocket(Listeners[callId].Ws)
 
 	Listeners[callId] = nil
 	return nil
@@ -75,11 +76,15 @@ func ReadRtp(callId string) {
 			return
 		}
 
-		resBuffer := make([]byte, 1024)
+		resBuffer := make([]byte, 180)
 		_, remoteAddr, err := Listeners[callId].Udp.ReadFromUDP(resBuffer)
 		if err != nil {
-			log.Error().Err(err).Msgf("failed to read from the udp socket")
+			//log.Error().Err(err).Msgf("failed to read from the udp socket")
 			continue
+		}
+
+		if len(resBuffer) >= 12 {
+			resBuffer = resBuffer[12:]
 		}
 
 		//TODO: checkout rtp packet header/payload format to extract PCMU/PCMA audio data
@@ -88,13 +93,13 @@ func ReadRtp(callId string) {
 		//}
 
 		//log.Debug().Msgf("received payload from udp the socket, payload: %s", string(reqBuffer))
-		fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%s\n", remoteAddr.IP.String(), remoteAddr.Port, string(resBuffer))
+		fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%+v\n", remoteAddr.IP.String(), remoteAddr.Port, string(resBuffer))
 
-		err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
-		if err != nil {
-			log.Error().Err(err).Msgf("failed to write to the websocket")
-			continue
-		}
+		//err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
+		//if err != nil {
+		//	log.Error().Err(err).Msgf("failed to write to the websocket")
+		//	continue
+		//}
 	}
 }
 
