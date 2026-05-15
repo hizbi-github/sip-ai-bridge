@@ -1,0 +1,125 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"sip-ai-bridge/rtp"
+	"sip-ai-bridge/sipuas"
+	"strconv"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+)
+
+var udpPortRangeForRtp map[string]bool
+
+func main() {
+	//logLvl, err := zerolog.ParseLevel(os.Getenv("API_LOG_LEVEL"))
+	logLvl, err := zerolog.ParseLevel("debug")
+	if err != nil {
+		log.Error().Err(err).Msg("failed to parse log level")
+		logLvl = zerolog.DebugLevel
+	}
+
+	zerolog.SetGlobalLevel(logLvl)
+
+	log.Info().Msg("starting udp socket...")
+	go sipuas.CreateUdpSocket()
+	rtp.Listeners = map[string]*rtp.RtpListener{}
+
+	httpMux := http.NewServeMux()
+
+	httpMux.HandleFunc("GET /create-rtp-listener", func(w http.ResponseWriter, r *http.Request) {
+		callId := r.URL.Query().Get("call-id")
+		rtpRemoteIp := r.URL.Query().Get("remote-ip")
+		rtpRemotePort := r.URL.Query().Get("remote-port")
+
+		log.Info().Str("path", r.URL.Path).Str("si-sp", r.RemoteAddr).
+			Str("call-id", callId).
+			Str("remote-ip", rtpRemoteIp).
+			Str("remote-port", rtpRemotePort).
+			Msg("received http request")
+
+		rtpListener, err := rtp.CreateRtpListener(rtpRemoteIp, rtpRemotePort)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to create a rtp listener")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error() + "\n"))
+			return
+		}
+
+		rtp.Listeners[callId] = rtpListener
+		go rtp.ReadRtp(callId)
+
+		rtpLocalIp := "127.0.0.1"
+		rtpLocalPort := strconv.Itoa(rtp.Listeners[callId].LocalAddr.Port)
+
+		log.Info().Str("path", r.URL.Path).Str("si-sp", r.RemoteAddr).
+			Str("call-id", callId).
+			Str("remote-ip", rtpRemoteIp).
+			Str("remote-port", rtpRemotePort).
+			Str("local-ip", rtpLocalIp).
+			Str("local-port", rtpLocalPort).
+			Msg("created rtp listener")
+
+		w.Header().Add("local-ip", rtpLocalIp)
+		w.Header().Add("local-port", rtpLocalPort)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK\n"))
+	})
+
+	httpMux.HandleFunc("GET /delete-rtp-listener", func(w http.ResponseWriter, r *http.Request) {
+		callId := r.URL.Query().Get("call-id")
+
+		log.Info().Str("path", r.URL.Path).Str("si-sp", r.RemoteAddr).
+			Str("call-id", callId).
+			Msg("received http request")
+
+		if rtp.Listeners[callId] == nil {
+			log.Error().Err(err).Msgf("no rtp listener found for the call-id")
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("no rtp listener found for the call-id\n"))
+			return
+		}
+
+		rtpRemoteIp := rtp.Listeners[callId].RemoteAddr.IP.String()
+		rtpRemotePort := strconv.Itoa(rtp.Listeners[callId].RemoteAddr.Port)
+		rtpLocalIp := "127.0.0.1"
+		rtpLocalPort := strconv.Itoa(rtp.Listeners[callId].LocalAddr.Port)
+
+		err := rtp.DeleteRtpListener(callId)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to delete the rtp listener")
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
+
+		log.Info().Str("path", r.URL.Path).Str("si-sp", r.RemoteAddr).
+			Str("call-id", callId).
+			Str("remote-ip", rtpRemoteIp).
+			Str("remote-port", rtpRemotePort).
+			Str("local-ip", rtpLocalIp).
+			Str("local-port", rtpLocalPort).
+			Msg("deleted rtp listener")
+
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK\n"))
+	})
+
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%s", "8080"),
+		Handler:      httpMux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	log.Info().Msg("starting http server...")
+	if err := server.ListenAndServe(); err != nil {
+		log.Error().Err(err).Msg("failed to start to http server")
+	}
+}
+
+//curl 'http://127.0.0.1:8080/start-rtp-coms?in-ip=1.1.1.1&in-port=42433'
