@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sip-ai-bridge/ws"
 	"strconv"
 
+	"github.com/coder/websocket"
 	"github.com/rs/zerolog/log"
 )
 
@@ -15,6 +17,7 @@ type RtpListener struct {
 	RemoteAddr *net.UDPAddr
 	LocalAddr  *net.UDPAddr
 	Udp        *net.UDPConn
+	Ws         *websocket.Conn
 }
 
 func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
@@ -34,10 +37,16 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 		return nil, err
 	}
 
+	ws, err := ws.CreateWebSocket()
+	if err != nil {
+		return nil, err
+	}
+
 	rtpListener := RtpListener{
 		RemoteAddr: remoteAddr,
 		LocalAddr:  localAddr,
 		Udp:        udpSocket,
+		Ws:         ws,
 	}
 
 	return &rtpListener, nil
@@ -50,15 +59,15 @@ func DeleteRtpListener(callId string) error {
 	}
 
 	Listeners[callId].Udp.Close()
-	Listeners[callId] = nil
+	ws.DeleteWebSocket(Listeners[callId].Ws)
 
+	Listeners[callId] = nil
 	return nil
 }
 
 func ReadRtp(callId string) {
 	defer Listeners[callId].Udp.Close()
 
-	reqBuffer := make([]byte, 1024)
 	for {
 		if Listeners[callId] == nil {
 			//if _, ok := Listeners[callId]; !ok {
@@ -66,7 +75,8 @@ func ReadRtp(callId string) {
 			return
 		}
 
-		_, remoteAddr, err := Listeners[callId].Udp.ReadFromUDP(reqBuffer)
+		resBuffer := make([]byte, 1024)
+		_, remoteAddr, err := Listeners[callId].Udp.ReadFromUDP(resBuffer)
 		if err != nil {
 			log.Error().Err(err).Msgf("failed to read from the udp socket")
 			continue
@@ -78,7 +88,13 @@ func ReadRtp(callId string) {
 		//}
 
 		//log.Debug().Msgf("received payload from udp the socket, payload: %s", string(reqBuffer))
-		fmt.Printf("received payload from udp the socket, si-sp: %s:%d, payload: \n%s\n", remoteAddr.IP.String(), remoteAddr.Port, string(reqBuffer))
+		fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%s\n", remoteAddr.IP.String(), remoteAddr.Port, string(resBuffer))
+
+		err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to write to the websocket")
+			continue
+		}
 	}
 }
 
@@ -90,15 +106,25 @@ func WriteRtp(callId string) {
 			return
 		}
 
-		resBuffer := make([]byte, 1024)
-		//resBuffer := parseRtp(string(reqBuffer))
-
-		fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
-
-		_, err := Listeners[callId].Udp.WriteToUDP(resBuffer, Listeners[callId].RemoteAddr)
+		res, err := ws.ReadFromWebSocket(Listeners[callId].Ws)
 		if err != nil {
-			log.Error().Err(err).Msgf("failed to write to the udp socket")
+			log.Error().Err(err).Msgf("failed to read from the websocket")
 			continue
 		}
+
+		log.Info().Str("res", string(res)).Msg("received payload from the websocket")
+		fmt.Printf("received payload from the websocket, si-sp: %s:%d, payload: \n%s\n", Listeners[callId].RemoteAddr.IP.String(), Listeners[callId].RemoteAddr.Port, string(res))
+
+		//TODO: send this text from cartesia to LLM, then back to cartesia for text to speech
+		//resBuffer := make([]byte, 1024)
+		//resBuffer := parseRtp(string(reqBuffer))
+
+		//fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
+
+		//_, err := Listeners[callId].Udp.WriteToUDP(resBuffer, Listeners[callId].RemoteAddr)
+		//if err != nil {
+		//log.Error().Err(err).Msgf("failed to write to the udp socket")
+		//continue
+		//}
 	}
 }
