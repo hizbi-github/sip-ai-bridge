@@ -6,12 +6,14 @@ import (
 	"net"
 	"sip-ai-bridge/ws"
 	"strconv"
+	"sync"
 
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog/log"
 )
 
 var Listeners map[string]*RtpListener
+var ListenersMutex sync.RWMutex
 
 type RtpListener struct {
 	RemoteAddr *net.UDPAddr
@@ -37,52 +39,67 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 		return nil, err
 	}
 
-	//ws, err := ws.CreateWebSocket()
-	//if err != nil {
-	//	return nil, err
-	//}
+	//TODO: this is super slow, move this into a goroutine somehow, otherwise we get mutiple INVITES, or maybe use a provisional response?
+	ws, err := ws.CreateWebSocket()
+	if err != nil {
+		return nil, err
+	}
 
 	rtpListener := RtpListener{
 		RemoteAddr: remoteAddr,
 		LocalAddr:  localAddr,
 		Udp:        udpSocket,
-		Ws:         nil,
-		//Ws:         ws,
+		Ws:         ws,
 	}
 
 	return &rtpListener, nil
 }
 
-func DeleteRtpListener(callId string) error {
+func DeleteRtpListener(callId string) (RtpListener, error) {
+	ListenersMutex.RLock()
+
 	if Listeners[callId] == nil {
 		//if _, ok := Listeners[callId]; !ok {
-		return errors.New("no rtp listener found for the call-id")
+		ListenersMutex.RUnlock()
+		return RtpListener{}, errors.New("no rtp listener found for the call-id")
 	}
 
 	Listeners[callId].Udp.Close()
-	//ws.DeleteWebSocket(Listeners[callId].Ws)
+	ws.DeleteWebSocket(Listeners[callId].Ws)
 
-	Listeners[callId] = nil
-	return nil
+	listener := Listeners[callId]
+	ListenersMutex.RUnlock()
+
+	ListenersMutex.Lock()
+	defer ListenersMutex.Unlock()
+
+	delete(Listeners, callId)
+	return *listener, nil
 }
 
 func ReadRtp(callId string) {
 	defer Listeners[callId].Udp.Close()
 
 	for {
+		ListenersMutex.RLock()
+
 		if Listeners[callId] == nil {
 			//if _, ok := Listeners[callId]; !ok {
-			log.Info().Msgf("udp socket closed, stopping read")
+			//log.Info().Msgf("udp socket closed, stopping read")
+			ListenersMutex.RUnlock()
 			return
 		}
 
-		resBuffer := make([]byte, 180)
-		_, remoteAddr, err := Listeners[callId].Udp.ReadFromUDP(resBuffer)
+		resBuffer := make([]byte, 172)
+		_, _, err := Listeners[callId].Udp.ReadFromUDP(resBuffer)
+		//_, remoteAddr, err := Listeners[callId].Udp.ReadFromUDP(resBuffer)
 		if err != nil {
 			//log.Error().Err(err).Msgf("failed to read from the udp socket")
+			ListenersMutex.RUnlock()
 			continue
 		}
 
+		//TODO: make this PCMU extraction more robust, it's very basic lol
 		if len(resBuffer) >= 12 {
 			resBuffer = resBuffer[12:]
 		}
@@ -93,13 +110,48 @@ func ReadRtp(callId string) {
 		//}
 
 		//log.Debug().Msgf("received payload from udp the socket, payload: %s", string(reqBuffer))
-		fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%+v\n", remoteAddr.IP.String(), remoteAddr.Port, string(resBuffer))
+		//fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%+v\n", remoteAddr.IP.String(), remoteAddr.Port, resBuffer)
 
+		err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to write to the websocket")
+			ListenersMutex.RUnlock()
+			continue
+		}
+
+		ListenersMutex.RUnlock()
+	}
+}
+
+func ReadStt(callId string) {
+	defer ws.DeleteWebSocket(Listeners[callId].Ws)
+
+	for {
+		ListenersMutex.RLock()
+
+		if Listeners[callId] == nil {
+			ListenersMutex.RUnlock()
+			return
+		}
+
+		res, err := ws.ReadFromWebSocket(Listeners[callId].Ws)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to read from the websocket")
+			ListenersMutex.RUnlock()
+			continue
+		}
+
+		//log.Info().Str("res", string(res)).Msg("received payload from the websocket")
+		fmt.Printf("received payload from the websocket, si-sp: %s:%d, payload: \n%s\n", Listeners[callId].RemoteAddr.IP.String(), Listeners[callId].RemoteAddr.Port, string(res))
+
+		//will write to llm stream
 		//err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
 		//if err != nil {
 		//	log.Error().Err(err).Msgf("failed to write to the websocket")
 		//	continue
 		//}
+
+		ListenersMutex.RUnlock()
 	}
 }
 
@@ -107,13 +159,17 @@ func WriteRtp(callId string) {
 	defer Listeners[callId].Udp.Close()
 
 	for {
+		ListenersMutex.RLock()
+
 		if Listeners[callId] == nil {
+			ListenersMutex.RUnlock()
 			return
 		}
 
 		res, err := ws.ReadFromWebSocket(Listeners[callId].Ws)
 		if err != nil {
 			log.Error().Err(err).Msgf("failed to read from the websocket")
+			ListenersMutex.RUnlock()
 			continue
 		}
 
@@ -131,5 +187,7 @@ func WriteRtp(callId string) {
 		//log.Error().Err(err).Msgf("failed to write to the udp socket")
 		//continue
 		//}
+
+		ListenersMutex.RUnlock()
 	}
 }

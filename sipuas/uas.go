@@ -132,6 +132,10 @@ func generateSdpAnswer(callId, sdpOffer string) ([]byte, error) {
 	localIp := res.Headers.Get("local-ip")
 	localPort := res.Headers.Get("local-port")
 
+	if res.Code != 200 || localIp == "" || localPort == "" {
+		return nil, errors.New(string(res.Body))
+	}
+
 	sdpAnswer := ""
 	sdpAnswer = sdpAnswer + "v=0\r\n"
 	sdpAnswer = sdpAnswer + "o=- " + strconv.FormatInt(time.Now().Unix(), 10) + " " + strconv.FormatInt(time.Now().Unix(), 10) + " IN IP4 " + localIp + "\r\n"

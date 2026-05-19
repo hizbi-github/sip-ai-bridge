@@ -51,6 +51,7 @@ func main() {
 
 		rtp.Listeners[callId] = rtpListener
 		go rtp.ReadRtp(callId)
+		go rtp.ReadStt(callId)
 
 		rtpLocalIp := "127.0.0.1"
 		rtpLocalPort := strconv.Itoa(rtp.Listeners[callId].LocalAddr.Port)
@@ -76,25 +77,18 @@ func main() {
 			Str("call-id", callId).
 			Msg("received http request")
 
-		if rtp.Listeners[callId] == nil {
-			log.Error().Err(err).Msgf("no rtp listener found for the call-id")
-			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte("no rtp listener found for the call-id\n"))
-			return
-		}
-
-		rtpRemoteIp := rtp.Listeners[callId].RemoteAddr.IP.String()
-		rtpRemotePort := strconv.Itoa(rtp.Listeners[callId].RemoteAddr.Port)
-		rtpLocalIp := "127.0.0.1"
-		rtpLocalPort := strconv.Itoa(rtp.Listeners[callId].LocalAddr.Port)
-
-		err := rtp.DeleteRtpListener(callId)
+		listener, err := rtp.DeleteRtpListener(callId)
 		if err != nil {
 			log.Error().Err(err).Msgf("failed to delete the rtp listener")
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(err.Error()))
 			return
 		}
+
+		rtpRemoteIp := listener.RemoteAddr.IP.String()
+		rtpRemotePort := strconv.Itoa(listener.RemoteAddr.Port)
+		rtpLocalIp := "127.0.0.1"
+		rtpLocalPort := strconv.Itoa(listener.LocalAddr.Port)
 
 		log.Info().Str("path", r.URL.Path).Str("si-sp", r.RemoteAddr).
 			Str("call-id", callId).

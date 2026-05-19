@@ -20,7 +20,7 @@ func CreateWebSocket() (*websocket.Conn, error) {
 	url = url + "&encoding=pcm_mulaw"
 	url = url + "&sample_rate=8000"
 	url = url + "&min_volume=0.0"
-	url = url + "&max_silence_duration_secs=2"
+	url = url + "&max_silence_duration_secs=250"
 	url = url + "&cartesia_version=2026-03-01"
 
 	var err error
@@ -53,13 +53,10 @@ func ReadFromWebSocket(ws *websocket.Conn) ([]byte, error) {
 		return nil, nil
 	}
 
-	//log.Info().Str("res", string(res)).Msg("received payload from websocket")
 	return res, nil
 }
 
 func WriteToWebSocket(ws *websocket.Conn, rawAudioPacket []byte) error {
-	//log.Info().Str("req", string(rawAudioPacket)).Msg("payload to be sent to websocket")
-
 	err := ws.Write(context.TODO(), websocket.MessageBinary, rawAudioPacket)
 	if err != nil {
 		return err
