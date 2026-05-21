@@ -1,6 +1,7 @@
 package rtp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -20,6 +21,7 @@ type RtpListener struct {
 	LocalAddr  *net.UDPAddr
 	Udp        *net.UDPConn
 	Ws         *websocket.Conn
+	AudioChunk []byte
 }
 
 func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
@@ -111,11 +113,23 @@ func ReadRtp(callId string) {
 		//log.Debug().Msgf("received payload from udp the socket, payload: %s", string(reqBuffer))
 		//fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%+v\n", remoteAddr.IP.String(), remoteAddr.Port, resBuffer)
 
-		err = ws.WriteToWebSocket(listener.Ws, resBuffer)
-		if err != nil {
-			log.Error().Err(err).Msgf("failed to write to the websocket")
-			continue
+		listener.AudioChunk = append(listener.AudioChunk, resBuffer...)
+
+		if len(listener.AudioChunk) >= 800 {
+			err = ws.WriteToWebSocket(listener.Ws, listener.AudioChunk)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to write to the websocket")
+				continue
+			}
+
+			ListenersMutex.Lock()
+			Listeners[callId].AudioChunk = []byte{}
+			ListenersMutex.Unlock()
 		}
+
+		ListenersMutex.Lock()
+		Listeners[callId].AudioChunk = append(listener.AudioChunk, resBuffer...)
+		ListenersMutex.Unlock()
 	}
 }
 
@@ -137,8 +151,20 @@ func ReadStt(callId string) {
 			continue
 		}
 
-		//log.Info().Str("res", string(res)).Msg("received payload from the websocket")
-		fmt.Printf("received payload from the websocket, si-sp: %s:%d, payload: \n%s\n", listener.RemoteAddr.IP.String(), listener.RemoteAddr.Port, string(res))
+		type CartesiaSttResponse struct {
+			Duration float64 `json:"duration"`
+			//IsFinal  bool   `json:"is_final"`
+			Text string `json:"text"`
+		}
+
+		sttRes := CartesiaSttResponse{}
+		err = json.Unmarshal(res, &sttRes)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to unmarshal the response from the websocket")
+			continue
+		}
+
+		log.Info().Float64("duration", sttRes.Duration).Str("text", sttRes.Text).Msg("received payload from the websocket")
 
 		//will write to llm stream
 		//err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)

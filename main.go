@@ -24,7 +24,7 @@ func main() {
 
 	zerolog.SetGlobalLevel(logLvl)
 
-	log.Info().Msg("starting udp socket...")
+	log.Info().Msg("starting sip server...")
 	go sip.CreateUdpSocket()
 	rtp.Listeners = map[string]*rtp.RtpListener{}
 

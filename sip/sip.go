@@ -45,17 +45,21 @@ func CreateUdpSocket() {
 
 		go func() {
 			err = processSipRequest(string(reqBuffer), remoteAddr, udpSocket)
-			log.Error().Err(err).Msgf("failed to process the SIP request")
-
-			resBuffer, err := generate503Res(string(reqBuffer))
 			if err != nil {
-				log.Error().Err(err).Msgf("failed to generate 503-Service Unavailable response")
-			}
+				log.Error().Err(err).Msgf("failed to process the SIP request")
 
-			fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
-			_, err = udpSocket.WriteToUDP(resBuffer, remoteAddr)
-			if err != nil {
-				log.Error().Err(err).Msgf("failed to write to the udp socket")
+				resBuffer, err := generate503Res(string(reqBuffer))
+				if err != nil {
+					log.Error().Err(err).Msgf("failed to generate 503-Service Unavailable response")
+					return
+				}
+
+				fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
+				_, err = udpSocket.WriteToUDP(resBuffer, remoteAddr)
+				if err != nil {
+					log.Error().Err(err).Msgf("failed to write to the udp socket")
+					return
+				}
 			}
 		}()
 	}
