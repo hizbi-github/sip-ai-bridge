@@ -82,20 +82,19 @@ func ReadRtp(callId string) {
 
 	for {
 		ListenersMutex.RLock()
+		listener := Listeners[callId]
+		ListenersMutex.RUnlock()
 
-		if Listeners[callId] == nil {
-			//if _, ok := Listeners[callId]; !ok {
+		if listener == nil {
 			//log.Info().Msgf("udp socket closed, stopping read")
-			ListenersMutex.RUnlock()
 			return
 		}
 
 		resBuffer := make([]byte, 172)
-		_, _, err := Listeners[callId].Udp.ReadFromUDP(resBuffer)
+		_, _, err := listener.Udp.ReadFromUDP(resBuffer)
 		//_, remoteAddr, err := Listeners[callId].Udp.ReadFromUDP(resBuffer)
 		if err != nil {
 			//log.Error().Err(err).Msgf("failed to read from the udp socket")
-			ListenersMutex.RUnlock()
 			continue
 		}
 
@@ -112,14 +111,11 @@ func ReadRtp(callId string) {
 		//log.Debug().Msgf("received payload from udp the socket, payload: %s", string(reqBuffer))
 		//fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%+v\n", remoteAddr.IP.String(), remoteAddr.Port, resBuffer)
 
-		err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
+		err = ws.WriteToWebSocket(listener.Ws, resBuffer)
 		if err != nil {
 			log.Error().Err(err).Msgf("failed to write to the websocket")
-			ListenersMutex.RUnlock()
 			continue
 		}
-
-		ListenersMutex.RUnlock()
 	}
 }
 
@@ -128,21 +124,21 @@ func ReadStt(callId string) {
 
 	for {
 		ListenersMutex.RLock()
+		listener := Listeners[callId]
+		ListenersMutex.RUnlock()
 
-		if Listeners[callId] == nil {
-			ListenersMutex.RUnlock()
+		if listener == nil {
 			return
 		}
 
-		res, err := ws.ReadFromWebSocket(Listeners[callId].Ws)
+		res, err := ws.ReadFromWebSocket(listener.Ws)
 		if err != nil {
 			log.Error().Err(err).Msgf("failed to read from the websocket")
-			ListenersMutex.RUnlock()
 			continue
 		}
 
 		//log.Info().Str("res", string(res)).Msg("received payload from the websocket")
-		fmt.Printf("received payload from the websocket, si-sp: %s:%d, payload: \n%s\n", Listeners[callId].RemoteAddr.IP.String(), Listeners[callId].RemoteAddr.Port, string(res))
+		fmt.Printf("received payload from the websocket, si-sp: %s:%d, payload: \n%s\n", listener.RemoteAddr.IP.String(), listener.RemoteAddr.Port, string(res))
 
 		//will write to llm stream
 		//err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
@@ -150,8 +146,6 @@ func ReadStt(callId string) {
 		//	log.Error().Err(err).Msgf("failed to write to the websocket")
 		//	continue
 		//}
-
-		ListenersMutex.RUnlock()
 	}
 }
 

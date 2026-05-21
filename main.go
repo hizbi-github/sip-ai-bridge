@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sip-ai-bridge/rtp"
-	"sip-ai-bridge/sipuas"
+	"sip-ai-bridge/sip"
 	"strconv"
 	"time"
 
@@ -25,7 +25,7 @@ func main() {
 	zerolog.SetGlobalLevel(logLvl)
 
 	log.Info().Msg("starting udp socket...")
-	go sipuas.CreateUdpSocket()
+	go sip.CreateUdpSocket()
 	rtp.Listeners = map[string]*rtp.RtpListener{}
 
 	httpMux := http.NewServeMux()
@@ -43,7 +43,13 @@ func main() {
 
 		rtpListener, err := rtp.CreateRtpListener(rtpRemoteIp, rtpRemotePort)
 		if err != nil {
-			log.Error().Err(err).Msgf("failed to create a rtp listener")
+			log.Info().Str("path", r.URL.Path).Str("si-sp", r.RemoteAddr).
+				Str("call-id", callId).
+				Str("remote-ip", rtpRemoteIp).
+				Str("remote-port", rtpRemotePort).
+				Err(err).
+				Msg("failed to create a rtp listener")
+
 			w.WriteHeader(http.StatusInternalServerError)
 			w.Write([]byte(err.Error() + "\n"))
 			return

@@ -1,4 +1,4 @@
-package sipuas
+package sip
 
 import (
 	"errors"
@@ -43,29 +43,76 @@ func CreateUdpSocket() {
 		//log.Debug().Msgf("received payload from udp the socket, payload: %s", string(reqBuffer))
 		fmt.Printf("received payload from udp the socket, payload: \n%s\n", string(reqBuffer))
 
-		resBuffer := []byte{}
-		if strings.HasPrefix(string(reqBuffer), "INVITE") {
-			resBuffer, err = generate200Res(string(reqBuffer))
+		go func() {
+			err = processSipRequest(string(reqBuffer), remoteAddr, udpSocket)
+			log.Error().Err(err).Msgf("failed to process the SIP request")
+
+			resBuffer, err := generate503Res(string(reqBuffer))
 			if err != nil {
-				log.Error().Err(err).Msgf("failed to generate 200-OK response")
-				continue
+				log.Error().Err(err).Msgf("failed to generate 503-Service Unavailable response")
 			}
-		} else if strings.HasPrefix(string(reqBuffer), "BYE") {
-			resBuffer, err = generateByeRes(string(reqBuffer))
+
+			fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
+			_, err = udpSocket.WriteToUDP(resBuffer, remoteAddr)
 			if err != nil {
-				log.Error().Err(err).Msgf("failed to generate 200-OK response")
-				continue
+				log.Error().Err(err).Msgf("failed to write to the udp socket")
 			}
+		}()
+	}
+}
+
+func processSipRequest(req string, remoteAddr *net.UDPAddr, socket *net.UDPConn) error {
+	if len(strings.Split(req, " ")) < 2 {
+		return errors.New("received an invalid SIP request")
+	}
+
+	requestMethod := strings.Split(req, " ")[0]
+
+	switch requestMethod {
+	case "INVITE":
+		resBuffer, err := generateProvRes(req)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to generate 100-Trying response")
 		}
 
 		fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
-
-		_, err = udpSocket.WriteToUDP(resBuffer, remoteAddr)
+		_, err = socket.WriteToUDP(resBuffer, remoteAddr)
 		if err != nil {
 			log.Error().Err(err).Msgf("failed to write to the udp socket")
-			continue
+			return err
 		}
+
+		resBuffer, err = generate200Res(req)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to generate 200-OK response")
+			return err
+		}
+
+		fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
+		_, err = socket.WriteToUDP(resBuffer, remoteAddr)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to write to the udp socket")
+			return err
+		}
+
+	case "BYE":
+		resBuffer, err := generateByeRes(req)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to generate 200-OK response")
+			return err
+		}
+
+		fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
+		_, err = socket.WriteToUDP(resBuffer, remoteAddr)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to write to the udp socket")
+			return err
+		}
+	default:
+		return errors.New("received a non-INVITE|BYE request")
 	}
+
+	return nil
 }
 
 func generate200Res(inviteReq string) ([]byte, error) {
@@ -201,4 +248,105 @@ func generateByeRes(inviteReq string) ([]byte, error) {
 	}
 
 	return []byte(answerRes), nil
+}
+
+func generateProvRes(inviteReq string) ([]byte, error) {
+	answerRes := "SIP/2.0 100 Trying\r\n"
+
+	for _, line := range strings.Split(inviteReq, "\r\n") {
+		//hdrKey := strings.TrimSpace(strings.Split(line, ":")[0])
+		//hdrValue := strings.TrimSpace(strings.Split(line, ":")[1])
+
+		if strings.Contains(line, "Via:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "From:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "To:") {
+			answerRes = answerRes + strings.TrimSpace(line) + ";tag=" + uuid.NewString() + "\r\n"
+		}
+
+		if strings.Contains(line, "Call-ID:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "CSeq:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+	}
+
+	answerRes = answerRes + "Contact: <sip:127.0.0.1:5060>\r\n"
+	answerRes = answerRes + "Content-Length: 0\r\n\r\n"
+
+	return []byte(answerRes), nil
+}
+
+func generate503Res(inviteReq string) ([]byte, error) {
+	answerRes := "SIP/2.0 503 Service Unavailable\r\n"
+
+	for _, line := range strings.Split(inviteReq, "\r\n") {
+		//hdrKey := strings.TrimSpace(strings.Split(line, ":")[0])
+		//hdrValue := strings.TrimSpace(strings.Split(line, ":")[1])
+
+		if strings.Contains(line, "Via:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "From:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "To:") {
+			answerRes = answerRes + strings.TrimSpace(line) + ";tag=" + uuid.NewString() + "\r\n"
+		}
+
+		if strings.Contains(line, "Call-ID:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "CSeq:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+	}
+
+	answerRes = answerRes + "Contact: <sip:127.0.0.1:5060>\r\n"
+	answerRes = answerRes + "Content-Length: 0\r\n\r\n"
+
+	return []byte(answerRes), nil
+}
+
+func generateMinimalSipHeaders(req string) []byte {
+	answerRes := ""
+
+	for _, line := range strings.Split(req, "\r\n") {
+		//hdrKey := strings.TrimSpace(strings.Split(line, ":")[0])
+		//hdrValue := strings.TrimSpace(strings.Split(line, ":")[1])
+
+		if strings.Contains(line, "Via:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "From:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "To:") {
+			answerRes = answerRes + strings.TrimSpace(line) + ";tag=" + uuid.NewString() + "\r\n"
+		}
+
+		if strings.Contains(line, "Call-ID:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+
+		if strings.Contains(line, "CSeq:") {
+			answerRes = answerRes + strings.TrimSpace(line) + "\r\n"
+		}
+	}
+
+	answerRes = answerRes + "Contact: <sip:127.0.0.1:5060>\r\n"
+
+	return []byte(answerRes)
 }
