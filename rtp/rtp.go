@@ -1,9 +1,9 @@
 package rtp
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"sip-ai-bridge/ws"
 	"strconv"
@@ -17,11 +17,13 @@ var Listeners map[string]*RtpListener
 var ListenersMutex sync.RWMutex
 
 type RtpListener struct {
-	RemoteAddr *net.UDPAddr
-	LocalAddr  *net.UDPAddr
-	Udp        *net.UDPConn
-	Ws         *websocket.Conn
-	AudioChunk []byte
+	RemoteAddr      *net.UDPAddr
+	LocalAddr       *net.UDPAddr
+	Udp             *net.UDPConn
+	SttWs           *websocket.Conn
+	TtsWs           *websocket.Conn
+	AudioChunkRead  []byte
+	AudioChunkWrite []byte
 }
 
 func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
@@ -42,7 +44,12 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 	}
 
 	//TODO: this is super slow, move this into a goroutine somehow, otherwise we get mutiple INVITES, or maybe use a provisional response?
-	ws, err := ws.CreateWebSocket()
+	sttWs, err := ws.CreateSttWebSocket()
+	if err != nil {
+		return nil, err
+	}
+
+	ttsWs, err := ws.CreateTtsWebSocket()
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +58,8 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 		RemoteAddr: remoteAddr,
 		LocalAddr:  localAddr,
 		Udp:        udpSocket,
-		Ws:         ws,
+		SttWs:      sttWs,
+		TtsWs:      ttsWs,
 	}
 
 	return &rtpListener, nil
@@ -67,7 +75,8 @@ func DeleteRtpListener(callId string) (RtpListener, error) {
 	}
 
 	Listeners[callId].Udp.Close()
-	ws.DeleteWebSocket(Listeners[callId].Ws)
+	ws.DeleteWebSocket(Listeners[callId].SttWs)
+	ws.DeleteWebSocket(Listeners[callId].TtsWs)
 
 	listener := Listeners[callId]
 	ListenersMutex.RUnlock()
@@ -100,6 +109,7 @@ func ReadRtp(callId string) {
 			continue
 		}
 
+		//TODO: try to run below in a goroutine
 		//TODO: make this PCMU extraction more robust, it's very basic lol
 		if len(resBuffer) >= 12 {
 			resBuffer = resBuffer[12:]
@@ -113,28 +123,29 @@ func ReadRtp(callId string) {
 		//log.Debug().Msgf("received payload from udp the socket, payload: %s", string(reqBuffer))
 		//fmt.Printf("received payload from the udp socket, si-sp: %s:%d, payload: \n%+v\n", remoteAddr.IP.String(), remoteAddr.Port, resBuffer)
 
-		listener.AudioChunk = append(listener.AudioChunk, resBuffer...)
+		listener.AudioChunkRead = append(listener.AudioChunkRead, resBuffer...)
 
-		if len(listener.AudioChunk) >= 800 {
-			err = ws.WriteToWebSocket(listener.Ws, listener.AudioChunk)
+		if len(listener.AudioChunkRead) >= 800 {
+			err = ws.WriteToWebSocket(listener.SttWs, listener.AudioChunkRead)
 			if err != nil {
 				log.Error().Err(err).Msgf("failed to write to the websocket")
 				continue
 			}
 
 			ListenersMutex.Lock()
-			Listeners[callId].AudioChunk = []byte{}
+			Listeners[callId].AudioChunkRead = []byte{}
 			ListenersMutex.Unlock()
 		}
 
+		//TODO: might not need mutex locking here at all
 		ListenersMutex.Lock()
-		Listeners[callId].AudioChunk = append(listener.AudioChunk, resBuffer...)
+		Listeners[callId].AudioChunkRead = append(listener.AudioChunkRead, resBuffer...)
 		ListenersMutex.Unlock()
 	}
 }
 
 func ReadStt(callId string) {
-	defer ws.DeleteWebSocket(Listeners[callId].Ws)
+	defer ws.DeleteWebSocket(Listeners[callId].SttWs)
 
 	for {
 		ListenersMutex.RLock()
@@ -145,69 +156,115 @@ func ReadStt(callId string) {
 			return
 		}
 
-		res, err := ws.ReadFromWebSocket(listener.Ws)
+		res, err := ws.ReadFromWebSocket(listener.SttWs)
 		if err != nil {
-			log.Error().Err(err).Msgf("failed to read from the websocket")
-			continue
-		}
-
-		type CartesiaSttResponse struct {
-			Duration float64 `json:"duration"`
-			//IsFinal  bool   `json:"is_final"`
-			Text string `json:"text"`
-		}
-
-		sttRes := CartesiaSttResponse{}
-		err = json.Unmarshal(res, &sttRes)
-		if err != nil {
-			log.Error().Err(err).Msgf("failed to unmarshal the response from the websocket")
-			continue
-		}
-
-		log.Info().Float64("duration", sttRes.Duration).Str("text", sttRes.Text).Msg("received payload from the websocket")
-
-		//will write to llm stream
-		//err = ws.WriteToWebSocket(Listeners[callId].Ws, resBuffer)
-		//if err != nil {
-		//	log.Error().Err(err).Msgf("failed to write to the websocket")
-		//	continue
-		//}
-	}
-}
-
-func WriteRtp(callId string) {
-	defer Listeners[callId].Udp.Close()
-
-	for {
-		ListenersMutex.RLock()
-
-		if Listeners[callId] == nil {
-			ListenersMutex.RUnlock()
+			log.Error().Err(err).Msgf("failed to read from the stt websocket")
 			return
 		}
 
-		res, err := ws.ReadFromWebSocket(Listeners[callId].Ws)
-		if err != nil {
-			log.Error().Err(err).Msgf("failed to read from the websocket")
-			ListenersMutex.RUnlock()
-			continue
+		go func(wsRes []byte, ttsWs *websocket.Conn) {
+			type CartesiaSttResponse struct {
+				IsFinal bool   `json:"is_final"`
+				Text    string `json:"text"`
+			}
+
+			sttRes := CartesiaSttResponse{}
+			err = json.Unmarshal(wsRes, &sttRes)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to unmarshal the response from the stt websocket")
+				return
+			}
+
+			log.Info().Bool("final", sttRes.IsFinal).Str("text", sttRes.Text).Msg("received payload from the stt websocket")
+
+			ttsReq := map[string]any{
+				"model_id":   "sonic-3.5",
+				"transcript": sttRes.Text,
+				"voice": map[string]string{
+					"mode": "id",
+					"id":   "a0e99841-438c-4a64-b679-ae501e7d6091",
+				},
+				"language":   "en",
+				"context_id": "ab977222-f9e0-4563-a1c0-5a934ae8fdd6",
+				//"context_id": uuid.NewString(),
+				"output_format": map[string]any{
+					"container":   "raw",
+					"encoding":    "pcm_mulaw",
+					"sample_rate": 8000,
+				},
+				"continue": false,
+			}
+
+			req, err := json.Marshal(ttsReq)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to marshal the request for the tts websocket")
+				return
+			}
+
+			err = ws.WriteToWebSocket(ttsWs, req)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to write to the tts websocket")
+				return
+			}
+		}(res, listener.TtsWs)
+	}
+}
+
+func ReadTts(callId string) {
+	defer ws.DeleteWebSocket(Listeners[callId].TtsWs)
+
+	for {
+		ListenersMutex.RLock()
+		listener := Listeners[callId]
+		ListenersMutex.RUnlock()
+
+		if listener == nil {
+			return
 		}
 
-		log.Info().Str("res", string(res)).Msg("received payload from the websocket")
-		fmt.Printf("received payload from the websocket, si-sp: %s:%d, payload: \n%s\n", Listeners[callId].RemoteAddr.IP.String(), Listeners[callId].RemoteAddr.Port, string(res))
+		res, err := ws.ReadFromWebSocket(listener.TtsWs)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to read from the tts websocket")
+			return
+		}
 
-		//TODO: send this text from cartesia to LLM, then back to cartesia for text to speech
-		//resBuffer := make([]byte, 1024)
-		//resBuffer := parseRtp(string(reqBuffer))
+		go func(wsRes []byte, udpConn *net.UDPConn) {
+			type CartesiaTtsResponse struct {
+				Type      string `json:"type"`
+				ContextID string `json:"context_id"`
+				Done      bool   `json:"done"`
+				Data      string `json:"data"`
+			}
 
-		//fmt.Printf("\n\npayload to be written to udp the socket, payload: \n%s\n", string(resBuffer))
+			ttsRes := CartesiaTtsResponse{}
+			err = json.Unmarshal(wsRes, &ttsRes)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to unmarshal the response from the tts websocket")
+				return
+			}
 
-		//_, err := Listeners[callId].Udp.WriteToUDP(resBuffer, Listeners[callId].RemoteAddr)
-		//if err != nil {
-		//log.Error().Err(err).Msgf("failed to write to the udp socket")
-		//continue
-		//}
+			if ttsRes.Type != "chunk" {
+				return
+			}
 
-		ListenersMutex.RUnlock()
+			ttsAudioChunkDecoded, err := base64.StdEncoding.DecodeString(ttsRes.Data)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to decode the base64 audio chunk from the tts websocket")
+				return
+			}
+
+			log.Info().Bool("final", ttsRes.Done).Int("len", len(ttsAudioChunkDecoded)).Bytes("audio", ttsAudioChunkDecoded).Msg("received payload from the tts websocket")
+			//log.Info().Str("res", string(wsRes)).Msg("received payload from the tts websocket")
+
+			resBuffer := make([]byte, 172)
+			resBuffer = ttsAudioChunkDecoded
+
+			//TODO: divide the tts audio chunk into 160 bytes and send those mini-chunks one by one
+			_, err = udpConn.WriteToUDP(resBuffer, Listeners[callId].RemoteAddr)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to write to the udp socket")
+				return
+			}
+		}(res, listener.Udp)
 	}
 }

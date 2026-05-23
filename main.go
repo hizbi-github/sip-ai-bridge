@@ -30,6 +30,7 @@ func main() {
 
 	httpMux := http.NewServeMux()
 
+	//TODO: move the handlers into separate functions
 	httpMux.HandleFunc("GET /create-rtp-listener", func(w http.ResponseWriter, r *http.Request) {
 		callId := r.URL.Query().Get("call-id")
 		rtpRemoteIp := r.URL.Query().Get("remote-ip")
@@ -58,6 +59,7 @@ func main() {
 		rtp.Listeners[callId] = rtpListener
 		go rtp.ReadRtp(callId)
 		go rtp.ReadStt(callId)
+		go rtp.ReadTts(callId)
 
 		rtpLocalIp := "127.0.0.1"
 		rtpLocalPort := strconv.Itoa(rtp.Listeners[callId].LocalAddr.Port)
