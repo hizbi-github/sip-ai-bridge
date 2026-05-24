@@ -4,10 +4,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"net"
 	"sip-ai-bridge/ws"
+	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog/log"
@@ -27,7 +30,8 @@ type RtpListener struct {
 }
 
 func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
-	remoteAddr, err := net.ResolveUDPAddr("udp", remoteIp+":"+remotePort)
+	//remoteAddr, err := net.ResolveUDPAddr("udp", remoteIp+":"+remotePort)
+	remoteAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:"+remotePort)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +232,7 @@ func ReadTts(callId string) {
 			return
 		}
 
-		go func(wsRes []byte, udpConn *net.UDPConn) {
+		go func(wsRes []byte, udpConn *net.UDPConn, remoteAddr *net.UDPAddr) {
 			type CartesiaTtsResponse struct {
 				Type      string `json:"type"`
 				ContextID string `json:"context_id"`
@@ -247,24 +251,39 @@ func ReadTts(callId string) {
 				return
 			}
 
-			ttsAudioChunkDecoded, err := base64.StdEncoding.DecodeString(ttsRes.Data)
+			audioSeq, err := base64.StdEncoding.DecodeString(ttsRes.Data)
 			if err != nil {
 				log.Error().Err(err).Msgf("failed to decode the base64 audio chunk from the tts websocket")
 				return
 			}
 
-			log.Info().Bool("final", ttsRes.Done).Int("len", len(ttsAudioChunkDecoded)).Bytes("audio", ttsAudioChunkDecoded).Msg("received payload from the tts websocket")
+			log.Info().Bool("final", ttsRes.Done).Int("len", len(audioSeq)).Float64("chunks", math.Ceil(float64(len(audioSeq))/160)).Msg("received payload from the tts websocket")
 			//log.Info().Str("res", string(wsRes)).Msg("received payload from the tts websocket")
 
-			resBuffer := make([]byte, 172)
-			resBuffer = ttsAudioChunkDecoded
+			for chunk := range slices.Chunk(audioSeq, 160) {
+				rtpHeader := make([]byte, 12)
+				rtpHeader = append(rtpHeader, byte(0b10000000), byte(0b00000000))
 
-			//TODO: divide the tts audio chunk into 160 bytes and send those mini-chunks one by one
-			_, err = udpConn.WriteToUDP(resBuffer, Listeners[callId].RemoteAddr)
-			if err != nil {
-				log.Error().Err(err).Msgf("failed to write to the udp socket")
-				return
+				seqNumber := uint16(123)
+				rtpHeader = append(rtpHeader, uint8(seqNumber>>8), uint8(seqNumber&0b11111111))
+
+				seqTimestamp := uint32(time.Now().UnixMilli())
+				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>8))
+				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>16))
+				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>24))
+				rtpHeader = append(rtpHeader, uint8(seqTimestamp&0b11111111))
+
+				rtpPacket := append(rtpHeader, chunk...)
+
+				_, err = udpConn.WriteToUDP(rtpPacket, remoteAddr)
+				if err != nil {
+					log.Error().Err(err).Msgf("failed to write to the udp socket")
+					continue
+				}
+
+				log.Info().Str("remote-ip", remoteAddr.IP.String()).Int("remote-port", remoteAddr.Port).Int("len", len(rtpPacket)).Msg("wrote rtp payload to the udp socket")
+				time.Sleep(20 * time.Millisecond)
 			}
-		}(res, listener.Udp)
+		}(res, listener.Udp, listener.RemoteAddr)
 	}
 }

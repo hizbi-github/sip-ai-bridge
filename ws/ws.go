@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog/log"
@@ -13,17 +14,14 @@ import (
 
 func CreateSttWebSocket() (*websocket.Conn, error) {
 	authHdrs := http.Header{}
-	authHdrs.Add("X-API-Key", "dummy")
-	//TODO: read API key from ENVs
+	authHdrs.Add("X-API-Key", os.Getenv("CARTESIA_API_KEY"))
 
-	url := "wss://api.cartesia.ai/stt/websocket"
 	//url := "wss://api.cartesia.ai/stt/turns/websocket"
+	url := "wss://api.cartesia.ai/stt/websocket"
 	url = url + "?model=ink-2"
 	url = url + "&language=en"
 	url = url + "&encoding=pcm_mulaw"
 	url = url + "&sample_rate=8000"
-	//url = url + "&min_volume=0.0"
-	//url = url + "&max_silence_duration_secs=250"
 	url = url + "&cartesia_version=2026-03-01"
 
 	var err error
@@ -50,17 +48,9 @@ func CreateSttWebSocket() (*websocket.Conn, error) {
 
 func CreateTtsWebSocket() (*websocket.Conn, error) {
 	authHdrs := http.Header{}
-	authHdrs.Add("X-API-Key", "dummy")
-	//TODO: read API key from ENVs
+	authHdrs.Add("X-API-Key", os.Getenv("CARTESIA_API_KEY"))
 
 	url := "wss://api.cartesia.ai/tts/websocket"
-	//url := "wss://api.cartesia.ai/stt/turns/websocket"
-	//url = url + "?model=sonic-3.5"
-	//url = url + "?model=sonic-latest"
-	//url = url + "&language=en"
-	//url = url + "&encoding=pcm_mulaw"
-	//url = url + "&sample_rate=8000"
-	//url = url + "&max_buffer_delay_ms=500"
 	url = url + "?cartesia_version=2026-03-01"
 
 	var err error
@@ -101,9 +91,8 @@ func ReadFromWebSocket(ws *websocket.Conn) ([]byte, error) {
 		return nil, err
 	}
 
-	//TODO: check if this is somehow blocking interim responses
 	//if resType != websocket.MessageText {
-	//return nil, nil
+	//	return nil, nil
 	//}
 
 	return res, nil
