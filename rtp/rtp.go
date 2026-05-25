@@ -18,6 +18,7 @@ import (
 
 var Listeners map[string]*RtpListener
 var ListenersMutex sync.RWMutex
+var seqCounter uint16
 
 type RtpListener struct {
 	RemoteAddr      *net.UDPAddr
@@ -261,17 +262,25 @@ func ReadTts(callId string) {
 			//log.Info().Str("res", string(wsRes)).Msg("received payload from the tts websocket")
 
 			for chunk := range slices.Chunk(audioSeq, 160) {
-				rtpHeader := make([]byte, 12)
+				//rtpHeader := make([]byte, 12)
+				rtpHeader := []byte{}
 				rtpHeader = append(rtpHeader, byte(0b10000000), byte(0b00000000))
 
-				seqNumber := uint16(123)
+				seqNumber := seqCounter
 				rtpHeader = append(rtpHeader, uint8(seqNumber>>8), uint8(seqNumber&0b11111111))
+				seqCounter = seqCounter + 1
 
 				seqTimestamp := uint32(time.Now().UnixMilli())
 				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>8))
 				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>16))
 				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>24))
 				rtpHeader = append(rtpHeader, uint8(seqTimestamp&0b11111111))
+
+				syncId := uint32(123456789)
+				rtpHeader = append(rtpHeader, uint8(syncId>>8))
+				rtpHeader = append(rtpHeader, uint8(syncId>>16))
+				rtpHeader = append(rtpHeader, uint8(syncId>>24))
+				rtpHeader = append(rtpHeader, uint8(syncId&0b11111111))
 
 				rtpPacket := append(rtpHeader, chunk...)
 
@@ -281,7 +290,16 @@ func ReadTts(callId string) {
 					continue
 				}
 
-				log.Info().Str("remote-ip", remoteAddr.IP.String()).Int("remote-port", remoteAddr.Port).Int("len", len(rtpPacket)).Msg("wrote rtp payload to the udp socket")
+				log.Info().
+					Str("remote-ip", remoteAddr.IP.String()).
+					Int("remote-port", remoteAddr.Port).
+					Int("rtp-header-len", len(rtpHeader)).
+					Int("rtp-body-len", len(chunk)).
+					Int("rtp-packet-len", len(rtpPacket)).
+					Msg("wrote rtp payload to the udp socket")
+
+				//fmt.Printf("rtp packet raw: %+v\n", rtpPacket)
+
 				time.Sleep(20 * time.Millisecond)
 			}
 		}(res, listener.Udp, listener.RemoteAddr)
