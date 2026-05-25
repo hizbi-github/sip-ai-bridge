@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog/log"
@@ -19,6 +18,7 @@ import (
 var Listeners map[string]*RtpListener
 var ListenersMutex sync.RWMutex
 var seqCounter uint16
+var seqTimestampCounter uint32
 
 type RtpListener struct {
 	RemoteAddr      *net.UDPAddr
@@ -130,12 +130,15 @@ func ReadRtp(callId string) {
 
 		listener.AudioChunkRead = append(listener.AudioChunkRead, resBuffer...)
 
-		if len(listener.AudioChunkRead) >= 800 {
-			err = ws.WriteToWebSocket(listener.SttWs, listener.AudioChunkRead)
-			if err != nil {
-				log.Error().Err(err).Msgf("failed to write to the websocket")
-				continue
-			}
+		if len(listener.AudioChunkRead) >= 1600 {
+			go func(wsConn *websocket.Conn, chunks []byte) {
+				err = ws.WriteToWebSocket(wsConn, chunks)
+				if err != nil {
+					log.Error().Err(err).Msgf("failed to write to the websocket")
+					return
+					//continue
+				}
+			}(listener.SttWs, listener.AudioChunkRead)
 
 			ListenersMutex.Lock()
 			Listeners[callId].AudioChunkRead = []byte{}
@@ -187,7 +190,8 @@ func ReadStt(callId string) {
 				"transcript": sttRes.Text,
 				"voice": map[string]string{
 					"mode": "id",
-					"id":   "a0e99841-438c-4a64-b679-ae501e7d6091",
+					"id":   "f786b574-daa5-4673-aa0c-cbe3e8534c02",
+					//"id":   "a5136bf9-224c-4d76-b823-52bd5efcffcc",
 				},
 				"language":   "en",
 				"context_id": "ab977222-f9e0-4563-a1c0-5a934ae8fdd6",
@@ -230,78 +234,87 @@ func ReadTts(callId string) {
 		res, err := ws.ReadFromWebSocket(listener.TtsWs)
 		if err != nil {
 			log.Error().Err(err).Msgf("failed to read from the tts websocket")
-			return
+			//return
+			continue
 		}
 
-		go func(wsRes []byte, udpConn *net.UDPConn, remoteAddr *net.UDPAddr) {
-			type CartesiaTtsResponse struct {
-				Type      string `json:"type"`
-				ContextID string `json:"context_id"`
-				Done      bool   `json:"done"`
-				Data      string `json:"data"`
-			}
+		//go func(wsRes []byte, udpConn *net.UDPConn, remoteAddr *net.UDPAddr) {
+		type CartesiaTtsResponse struct {
+			Type      string `json:"type"`
+			ContextID string `json:"context_id"`
+			Done      bool   `json:"done"`
+			Data      string `json:"data"`
+		}
 
-			ttsRes := CartesiaTtsResponse{}
-			err = json.Unmarshal(wsRes, &ttsRes)
+		ttsRes := CartesiaTtsResponse{}
+		//err = json.Unmarshal(wsRes, &ttsRes)
+		err = json.Unmarshal(res, &ttsRes)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to unmarshal the response from the tts websocket")
+			//return
+			continue
+		}
+
+		if ttsRes.Type != "chunk" {
+			//return
+			continue
+		}
+
+		audioSeq, err := base64.StdEncoding.DecodeString(ttsRes.Data)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to decode the base64 audio chunk from the tts websocket")
+			//return
+			continue
+		}
+
+		log.Info().Bool("final", ttsRes.Done).Int("len", len(audioSeq)).Float64("chunks", math.Ceil(float64(len(audioSeq))/160)).Msg("received payload from the tts websocket")
+		//log.Info().Str("res", string(wsRes)).Msg("received payload from the tts websocket")
+
+		for chunk := range slices.Chunk(audioSeq, 160) {
+			//rtpHeader := make([]byte, 12)
+			rtpHeader := []byte{}
+			rtpHeader = append(rtpHeader, byte(0b10000000), byte(0b00000000))
+
+			seqNumber := seqCounter
+			rtpHeader = append(rtpHeader, uint8(seqNumber>>8), uint8(seqNumber&0b11111111))
+			seqCounter = seqCounter + 1
+
+			seqTimestamp := seqTimestampCounter
+			rtpHeader = append(rtpHeader, uint8(seqTimestamp>>24))
+			rtpHeader = append(rtpHeader, uint8(seqTimestamp>>16))
+			rtpHeader = append(rtpHeader, uint8(seqTimestamp>>8))
+			rtpHeader = append(rtpHeader, uint8(seqTimestamp&0b11111111))
+			seqTimestampCounter = seqTimestampCounter + 160
+
+			syncId := uint32(123456789)
+			rtpHeader = append(rtpHeader, uint8(syncId>>24))
+			rtpHeader = append(rtpHeader, uint8(syncId>>16))
+			rtpHeader = append(rtpHeader, uint8(syncId>>8))
+			rtpHeader = append(rtpHeader, uint8(syncId&0b11111111))
+
+			rtpPacket := append(rtpHeader, chunk...)
+
+			//_, err = udpConn.WriteToUDP(rtpPacket, remoteAddr)
+			_, err = listener.Udp.WriteToUDP(rtpPacket, listener.RemoteAddr)
 			if err != nil {
-				log.Error().Err(err).Msgf("failed to unmarshal the response from the tts websocket")
-				return
+				log.Error().Err(err).Msgf("failed to write to the udp socket")
+				continue
 			}
 
-			if ttsRes.Type != "chunk" {
-				return
-			}
+			log.Info().
+				//Str("remote-ip", remoteAddr.IP.String()).
+				//Int("remote-port", remoteAddr.Port).
+				Str("remote-ip", listener.RemoteAddr.IP.String()).
+				Int("remote-port", listener.RemoteAddr.Port).
+				Int("rtp-header-len", len(rtpHeader)).
+				Int("rtp-body-len", len(chunk)).
+				Int("rtp-packet-len", len(rtpPacket)).
+				Msg("wrote rtp payload to the udp socket")
 
-			audioSeq, err := base64.StdEncoding.DecodeString(ttsRes.Data)
-			if err != nil {
-				log.Error().Err(err).Msgf("failed to decode the base64 audio chunk from the tts websocket")
-				return
-			}
+			//fmt.Printf("rtp packet raw: %+v\n", rtpPacket)
 
-			log.Info().Bool("final", ttsRes.Done).Int("len", len(audioSeq)).Float64("chunks", math.Ceil(float64(len(audioSeq))/160)).Msg("received payload from the tts websocket")
-			//log.Info().Str("res", string(wsRes)).Msg("received payload from the tts websocket")
-
-			for chunk := range slices.Chunk(audioSeq, 160) {
-				//rtpHeader := make([]byte, 12)
-				rtpHeader := []byte{}
-				rtpHeader = append(rtpHeader, byte(0b10000000), byte(0b00000000))
-
-				seqNumber := seqCounter
-				rtpHeader = append(rtpHeader, uint8(seqNumber>>8), uint8(seqNumber&0b11111111))
-				seqCounter = seqCounter + 1
-
-				seqTimestamp := uint32(time.Now().UnixMilli())
-				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>8))
-				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>16))
-				rtpHeader = append(rtpHeader, uint8(seqTimestamp>>24))
-				rtpHeader = append(rtpHeader, uint8(seqTimestamp&0b11111111))
-
-				syncId := uint32(123456789)
-				rtpHeader = append(rtpHeader, uint8(syncId>>8))
-				rtpHeader = append(rtpHeader, uint8(syncId>>16))
-				rtpHeader = append(rtpHeader, uint8(syncId>>24))
-				rtpHeader = append(rtpHeader, uint8(syncId&0b11111111))
-
-				rtpPacket := append(rtpHeader, chunk...)
-
-				_, err = udpConn.WriteToUDP(rtpPacket, remoteAddr)
-				if err != nil {
-					log.Error().Err(err).Msgf("failed to write to the udp socket")
-					continue
-				}
-
-				log.Info().
-					Str("remote-ip", remoteAddr.IP.String()).
-					Int("remote-port", remoteAddr.Port).
-					Int("rtp-header-len", len(rtpHeader)).
-					Int("rtp-body-len", len(chunk)).
-					Int("rtp-packet-len", len(rtpPacket)).
-					Msg("wrote rtp payload to the udp socket")
-
-				//fmt.Printf("rtp packet raw: %+v\n", rtpPacket)
-
-				time.Sleep(20 * time.Millisecond)
-			}
-		}(res, listener.Udp, listener.RemoteAddr)
+			//time.Sleep(20 * time.Millisecond)
+		}
+		//}(res, listener.Udp, listener.RemoteAddr)
 	}
 }
