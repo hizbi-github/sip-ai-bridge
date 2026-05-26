@@ -60,6 +60,7 @@ func main() {
 		go rtp.ReadRtp(callId)
 		go rtp.ReadStt(callId)
 		go rtp.ReadTts(callId)
+		go rtp.WriteRtp(callId)
 
 		rtpLocalIp := "127.0.0.1"
 		rtpLocalPort := strconv.Itoa(rtp.Listeners[callId].LocalAddr.Port)

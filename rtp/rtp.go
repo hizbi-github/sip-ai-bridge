@@ -6,10 +6,12 @@ import (
 	"errors"
 	"math"
 	"net"
+	"sip-ai-bridge/rb"
 	"sip-ai-bridge/ws"
 	"slices"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"github.com/rs/zerolog/log"
@@ -28,6 +30,20 @@ type RtpListener struct {
 	TtsWs           *websocket.Conn
 	AudioChunkRead  []byte
 	AudioChunkWrite []byte
+	AudioBuffer     rb.RingBuffer[[]byte]
+	//AudioBuffer     rb.RingBuffer[RtpPacket]
+}
+
+type RtpPacket struct {
+	Version      string
+	Padding      bool
+	Extension    bool
+	Marker       bool
+	SeqCounter   uint16
+	SeqTimestamp uint32
+	SeqId        uint32
+	PayloadType  string
+	Payload      []byte
 }
 
 func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
@@ -60,11 +76,12 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 	}
 
 	rtpListener := RtpListener{
-		RemoteAddr: remoteAddr,
-		LocalAddr:  localAddr,
-		Udp:        udpSocket,
-		SttWs:      sttWs,
-		TtsWs:      ttsWs,
+		RemoteAddr:  remoteAddr,
+		LocalAddr:   localAddr,
+		Udp:         udpSocket,
+		SttWs:       sttWs,
+		TtsWs:       ttsWs,
+		AudioBuffer: rb.New[[]byte](500),
 	}
 
 	return &rtpListener, nil
@@ -130,7 +147,7 @@ func ReadRtp(callId string) {
 
 		listener.AudioChunkRead = append(listener.AudioChunkRead, resBuffer...)
 
-		if len(listener.AudioChunkRead) >= 1600 {
+		if len(listener.AudioChunkRead) >= 800 {
 			go func(wsConn *websocket.Conn, chunks []byte) {
 				err = ws.WriteToWebSocket(wsConn, chunks)
 				if err != nil {
@@ -274,11 +291,13 @@ func ReadTts(callId string) {
 			//rtpHeader := make([]byte, 12)
 			rtpHeader := []byte{}
 			rtpHeader = append(rtpHeader, byte(0b10000000), byte(0b00000000))
+			//TODO: the mark bit should be set as 1 for the first RTP payload
 
 			seqNumber := seqCounter
 			rtpHeader = append(rtpHeader, uint8(seqNumber>>8), uint8(seqNumber&0b11111111))
 			seqCounter = seqCounter + 1
 
+			//TODO: timestamp value should start from 160 not 0
 			seqTimestamp := seqTimestampCounter
 			rtpHeader = append(rtpHeader, uint8(seqTimestamp>>24))
 			rtpHeader = append(rtpHeader, uint8(seqTimestamp>>16))
@@ -295,11 +314,12 @@ func ReadTts(callId string) {
 			rtpPacket := append(rtpHeader, chunk...)
 
 			//_, err = udpConn.WriteToUDP(rtpPacket, remoteAddr)
-			_, err = listener.Udp.WriteToUDP(rtpPacket, listener.RemoteAddr)
-			if err != nil {
-				log.Error().Err(err).Msgf("failed to write to the udp socket")
-				continue
-			}
+			//_, err = listener.Udp.WriteToUDP(rtpPacket, listener.RemoteAddr)
+			//if err != nil {
+			//log.Error().Err(err).Msgf("failed to write to the udp socket")
+			//continue
+			//}
+			rb.Push(rtpPacket, &listener.AudioBuffer)
 
 			log.Info().
 				//Str("remote-ip", remoteAddr.IP.String()).
@@ -309,12 +329,46 @@ func ReadTts(callId string) {
 				Int("rtp-header-len", len(rtpHeader)).
 				Int("rtp-body-len", len(chunk)).
 				Int("rtp-packet-len", len(rtpPacket)).
-				Msg("wrote rtp payload to the udp socket")
+				Msg("wrote rtp payload to the rtp audio buffer")
 
 			//fmt.Printf("rtp packet raw: %+v\n", rtpPacket)
 
-			//time.Sleep(20 * time.Millisecond)
+			//rtpPacket := listener.AudioBuffer.Push()
+			//if err != nil {
+			//log.Error().Err(err).Msgf("failed to push into the rtp ring buffer")
+			//continue
+			//}
 		}
 		//}(res, listener.Udp, listener.RemoteAddr)
+	}
+}
+
+func WriteRtp(callId string) error {
+	//defer Listeners[callId].Udp.Close()
+	ticker := time.NewTicker(50 * time.Millisecond)
+
+	for {
+		<-ticker.C
+
+		ListenersMutex.RLock()
+		listener := Listeners[callId]
+		ListenersMutex.RUnlock()
+
+		if listener == nil {
+			log.Info().Msgf("udp socket closed, stopping writes")
+			return nil
+		}
+
+		rtpPacket, err := rb.Pop(&listener.AudioBuffer)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to pop from the rtp ring buffer")
+			continue
+		}
+
+		_, err = listener.Udp.WriteToUDP(rtpPacket, listener.RemoteAddr)
+		if err != nil {
+			log.Error().Err(err).Msgf("failed to write to the udp socket")
+			continue
+		}
 	}
 }
