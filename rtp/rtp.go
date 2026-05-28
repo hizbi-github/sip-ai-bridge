@@ -13,6 +13,7 @@ import (
 	"sip-ai-bridge/ws"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,7 @@ type RtpListener struct {
 	TtsWs           *websocket.Conn
 	AudioChunkRead  []byte
 	AudioChunkWrite []byte
+	LlmContext      []string
 	AudioBuffer     rb.RingBuffer[[]byte]
 	//AudioBuffer     rb.RingBuffer[RtpPacket]
 }
@@ -190,7 +192,7 @@ func ReadStt(callId string) {
 			return
 		}
 
-		go func(wsRes []byte, ttsWs *websocket.Conn) {
+		go func(wsRes []byte, ttsWs *websocket.Conn, session *RtpListener) {
 			type CartesiaSttResponse struct {
 				IsFinal    bool   `json:"is_final"`
 				Text       string `json:"text"`
@@ -211,14 +213,16 @@ func ReadStt(callId string) {
 
 			log.Info().Bool("final", sttRes.IsFinal).Str("text", sttRes.Text).Str("type", sttRes.Type).Str("transcript", sttRes.Transcript).Msg("received payload from the stt websocket")
 
+			llmContext := strings.Join(session.LlmContext, "\n")
+
 			httpReq := utils.HttpRequest{
 				Method: "POST",
 				Url:    "https://openrouter.ai/api/v1/chat/completions",
 				Headers: map[string][]string{
-					"Content-Type":  []string{"application/json"},
-					"Authorization": []string{"Bearer " + os.Getenv("OPENROUTER_API_KEY")},
+					"Content-Type":  {"application/json"},
+					"Authorization": {"Bearer " + os.Getenv("OPENROUTER_API_KEY")},
 				},
-				Body: bytes.NewReader([]byte(fmt.Sprintf(`{"model": "deepseek/deepseek-v4-flash", "stream": false, "reasoning": {"enabled": false}, "messages": [{"role": "system", "content": "You are a customer support representative for McDonald food order services, always introduce yourself and present a 2 item menu of popular items. Be very concise, and don't converse in more than 15 words at a time."}, {"role": "user", "content": "%s"}]}`, sttRes.Transcript))),
+				Body: bytes.NewReader([]byte(fmt.Sprintf(`{"model": "deepseek/deepseek-v4-flash", "stream": false, "reasoning": {"enabled": false}, "messages": [{"role": "system", "content": "You are a professional customer support representative. Always introduce yourself. Be concise, and don't converse in more than 25 words at a time. The list below contains the conversation history between the LLM and the user, starting after the dashed line.\n-----\n%s"}, {"role": "user", "content": "%s"}]}`, llmContext, sttRes.Transcript))),
 			}
 
 			httpRes, err := utils.NewHttpReq(httpReq)
@@ -244,7 +248,26 @@ func ReadStt(callId string) {
 				return
 			}
 
+			if len(llmRes.Choices) < 1 {
+				return
+			}
+
 			log.Info().Str("llm", llmRes.Choices[0].Message.Content).Msg("received payload from the llm api")
+
+			llmTrans := []string{
+				"user: " + sttRes.Transcript,
+				"llm: " + llmRes.Choices[0].Message.Content,
+			}
+
+			//ListenersMutex.Lock()
+			session.LlmContext = append(session.LlmContext, llmTrans...)
+			//ListenersMutex.Unlock()
+
+			err = rb.Flush(&session.AudioBuffer)
+			if err != nil {
+				//log.Error().Err(err).Msgf("failed to pop from the rtp ring buffer")
+				return
+			}
 
 			ttsReq := map[string]any{
 				"model_id":   "sonic-3.5",
@@ -278,7 +301,7 @@ func ReadStt(callId string) {
 				log.Error().Err(err).Msgf("failed to write to the tts websocket")
 				return
 			}
-		}(res, listener.TtsWs)
+		}(res, listener.TtsWs, listener)
 	}
 }
 

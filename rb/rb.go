@@ -42,3 +42,12 @@ func Pop[T any](buffer *RingBuffer[T]) (T, error) {
 
 	return elem, nil
 }
+
+func Flush[T any](buffer *RingBuffer[T]) error {
+	if buffer == nil {
+		return errors.New("ring buffer does not exist")
+	}
+
+	buffer.ReadIndex = buffer.WriteIndex
+	return nil
+}
