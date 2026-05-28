@@ -1,12 +1,15 @@
 package rtp
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"math"
+	"fmt"
 	"net"
+	"os"
 	"sip-ai-bridge/rb"
+	"sip-ai-bridge/utils"
 	"sip-ai-bridge/ws"
 	"slices"
 	"strconv"
@@ -81,7 +84,7 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 		Udp:         udpSocket,
 		SttWs:       sttWs,
 		TtsWs:       ttsWs,
-		AudioBuffer: rb.New[[]byte](500),
+		AudioBuffer: rb.New[[]byte](5000),
 	}
 
 	return &rtpListener, nil
@@ -189,8 +192,10 @@ func ReadStt(callId string) {
 
 		go func(wsRes []byte, ttsWs *websocket.Conn) {
 			type CartesiaSttResponse struct {
-				IsFinal bool   `json:"is_final"`
-				Text    string `json:"text"`
+				IsFinal    bool   `json:"is_final"`
+				Text       string `json:"text"`
+				Transcript string `json:"transcript"`
+				Type       string `json:"type"`
 			}
 
 			sttRes := CartesiaSttResponse{}
@@ -200,11 +205,51 @@ func ReadStt(callId string) {
 				return
 			}
 
-			log.Info().Bool("final", sttRes.IsFinal).Str("text", sttRes.Text).Msg("received payload from the stt websocket")
+			if sttRes.Type != "turn.end" {
+				return
+			}
+
+			log.Info().Bool("final", sttRes.IsFinal).Str("text", sttRes.Text).Str("type", sttRes.Type).Str("transcript", sttRes.Transcript).Msg("received payload from the stt websocket")
+
+			httpReq := utils.HttpRequest{
+				Method: "POST",
+				Url:    "https://openrouter.ai/api/v1/chat/completions",
+				Headers: map[string][]string{
+					"Content-Type":  []string{"application/json"},
+					"Authorization": []string{"Bearer " + os.Getenv("OPENROUTER_API_KEY")},
+				},
+				Body: bytes.NewReader([]byte(fmt.Sprintf(`{"model": "deepseek/deepseek-v4-flash", "stream": false, "reasoning": {"enabled": false}, "messages": [{"role": "system", "content": "You are a customer support representative for McDonald food order services, always introduce yourself and present a 2 item menu of popular items. Be very concise, and don't converse in more than 15 words at a time."}, {"role": "user", "content": "%s"}]}`, sttRes.Transcript))),
+			}
+
+			httpRes, err := utils.NewHttpReq(httpReq)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to send llm request to openrouter api")
+				return
+			}
+
+			type OpenRouterLlmResponse struct {
+				Created int `json:"created"`
+				Choices []struct {
+					Message struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					} `json:"message"`
+				} `json:"choices"`
+			}
+
+			llmRes := OpenRouterLlmResponse{}
+			err = json.Unmarshal(httpRes.Body, &llmRes)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to unmarshal the response from the llm api")
+				return
+			}
+
+			log.Info().Str("llm", llmRes.Choices[0].Message.Content).Msg("received payload from the llm api")
 
 			ttsReq := map[string]any{
 				"model_id":   "sonic-3.5",
-				"transcript": sttRes.Text,
+				"transcript": llmRes.Choices[0].Message.Content,
+				//"transcript": sttRes.Transcript,
 				"voice": map[string]string{
 					"mode": "id",
 					"id":   "f786b574-daa5-4673-aa0c-cbe3e8534c02",
@@ -218,7 +263,8 @@ func ReadStt(callId string) {
 					"encoding":    "pcm_mulaw",
 					"sample_rate": 8000,
 				},
-				"continue": false,
+				"continue": true,
+				"flush":    true,
 			}
 
 			req, err := json.Marshal(ttsReq)
@@ -284,7 +330,7 @@ func ReadTts(callId string) {
 			continue
 		}
 
-		log.Info().Bool("final", ttsRes.Done).Int("len", len(audioSeq)).Float64("chunks", math.Ceil(float64(len(audioSeq))/160)).Msg("received payload from the tts websocket")
+		//log.Info().Bool("final", ttsRes.Done).Int("len", len(audioSeq)).Float64("chunks", math.Ceil(float64(len(audioSeq))/160)).Msg("received payload from the tts websocket")
 		//log.Info().Str("res", string(wsRes)).Msg("received payload from the tts websocket")
 
 		for chunk := range slices.Chunk(audioSeq, 160) {
@@ -321,15 +367,15 @@ func ReadTts(callId string) {
 			//}
 			rb.Push(rtpPacket, &listener.AudioBuffer)
 
-			log.Info().
-				//Str("remote-ip", remoteAddr.IP.String()).
-				//Int("remote-port", remoteAddr.Port).
-				Str("remote-ip", listener.RemoteAddr.IP.String()).
-				Int("remote-port", listener.RemoteAddr.Port).
-				Int("rtp-header-len", len(rtpHeader)).
-				Int("rtp-body-len", len(chunk)).
-				Int("rtp-packet-len", len(rtpPacket)).
-				Msg("wrote rtp payload to the rtp audio buffer")
+			//log.Info().
+			//Str("remote-ip", remoteAddr.IP.String()).
+			//Int("remote-port", remoteAddr.Port).
+			//Str("remote-ip", listener.RemoteAddr.IP.String()).
+			//Int("remote-port", listener.RemoteAddr.Port).
+			//Int("rtp-header-len", len(rtpHeader)).
+			//Int("rtp-body-len", len(chunk)).
+			//Int("rtp-packet-len", len(rtpPacket)).
+			//Msg("wrote rtp payload to the rtp audio buffer")
 
 			//fmt.Printf("rtp packet raw: %+v\n", rtpPacket)
 
@@ -345,7 +391,7 @@ func ReadTts(callId string) {
 
 func WriteRtp(callId string) error {
 	//defer Listeners[callId].Udp.Close()
-	ticker := time.NewTicker(50 * time.Millisecond)
+	ticker := time.NewTicker(19 * time.Millisecond)
 
 	for {
 		<-ticker.C
@@ -361,7 +407,7 @@ func WriteRtp(callId string) error {
 
 		rtpPacket, err := rb.Pop(&listener.AudioBuffer)
 		if err != nil {
-			log.Error().Err(err).Msgf("failed to pop from the rtp ring buffer")
+			//log.Error().Err(err).Msgf("failed to pop from the rtp ring buffer")
 			continue
 		}
 

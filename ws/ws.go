@@ -16,8 +16,8 @@ func CreateSttWebSocket() (*websocket.Conn, error) {
 	authHdrs := http.Header{}
 	authHdrs.Add("X-API-Key", os.Getenv("CARTESIA_API_KEY"))
 
-	//url := "wss://api.cartesia.ai/stt/turns/websocket"
-	url := "wss://api.cartesia.ai/stt/websocket"
+	url := "wss://api.cartesia.ai/stt/turns/websocket"
+	//url := "wss://api.cartesia.ai/stt/websocket"
 	url = url + "?model=ink-2"
 	url = url + "&language=en"
 	url = url + "&encoding=pcm_mulaw"
