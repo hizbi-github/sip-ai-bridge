@@ -12,8 +12,6 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-var udpPortRangeForRtp map[string]bool
-
 func main() {
 	//logLvl, err := zerolog.ParseLevel(os.Getenv("API_LOG_LEVEL"))
 	logLvl, err := zerolog.ParseLevel("debug")
@@ -26,6 +24,9 @@ func main() {
 
 	log.Info().Msg("starting sip server...")
 	go sip.CreateUdpSocket()
+
+	rtp.InitUdpPortRange()
+
 	rtp.Listeners = map[string]*rtp.RtpListener{}
 
 	httpMux := http.NewServeMux()

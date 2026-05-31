@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"sip-ai-bridge/rb"
@@ -25,6 +26,8 @@ var Listeners map[string]*RtpListener
 var ListenersMutex sync.RWMutex
 var seqCounter uint16
 var seqTimestampCounter uint32
+
+var RtpUdpPorts map[int]bool
 
 type RtpListener struct {
 	RemoteAddr      *net.UDPAddr
@@ -58,8 +61,12 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 		return nil, err
 	}
 
-	//TODO: implement a udp port range and pick a random free port
-	localAddr, err := net.ResolveUDPAddr("udp", ":"+strconv.Itoa(30123))
+	freePort, err := GetFreeUdpPort()
+	if err != nil {
+		return nil, err
+	}
+
+	localAddr, err := net.ResolveUDPAddr("udp", ":"+strconv.Itoa(freePort))
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +99,68 @@ func CreateRtpListener(remoteIp, remotePort string) (*RtpListener, error) {
 	return &rtpListener, nil
 }
 
+func InitUdpPortRange() error {
+	if os.Getenv("RTP_PORT_MIN_RANGE") == "" || os.Getenv("RTP_PORT_MAX_RANGE") == "" {
+		return errors.New("rtp min port range or max port range is empty")
+	}
+
+	minPortRange, err := strconv.Atoi(os.Getenv("RTP_PORT_MIN_RANGE"))
+	if err != nil {
+		return err
+	}
+
+	maxPortRange, err := strconv.Atoi(os.Getenv("RTP_PORT_MAX_RANGE"))
+	if err != nil {
+		return err
+	}
+
+	if maxPortRange <= minPortRange {
+		return errors.New("rtp max port range must be greater than min port range")
+	}
+
+	RtpUdpPorts = map[int]bool{}
+	for port := minPortRange; port <= maxPortRange; port++ {
+		RtpUdpPorts[port] = true
+	}
+
+	return nil
+}
+
+func GetFreeUdpPort() (int, error) {
+	freePorts := []int{}
+	for port, free := range RtpUdpPorts {
+		if free == true {
+			freePorts = append(freePorts, port)
+		}
+	}
+
+	numOfFreePorts := len(freePorts)
+
+	if numOfFreePorts <= 0 {
+		return 0, errors.New("no free rtp udp ports available")
+	}
+
+	freePortIndex := rand.IntN(numOfFreePorts)
+
+	if freePortIndex >= numOfFreePorts {
+		freePortIndex = numOfFreePorts - 1 //trying to clip in case it somehow slips out of bounds
+	}
+
+	RtpUdpPorts[freePorts[freePortIndex]] = false
+
+	return freePorts[freePortIndex], nil
+}
+
+func SetFreeUdpPort(port int) error {
+	if RtpUdpPorts[port] != false {
+		return errors.New("failed to free rtp udp port, it was already free")
+	}
+
+	RtpUdpPorts[port] = true
+
+	return nil
+}
+
 func DeleteRtpListener(callId string) (RtpListener, error) {
 	ListenersMutex.RLock()
 
@@ -112,6 +181,10 @@ func DeleteRtpListener(callId string) (RtpListener, error) {
 	defer ListenersMutex.Unlock()
 
 	delete(Listeners, callId)
+
+	//TODO: might need read/write locking
+	SetFreeUdpPort(listener.LocalAddr.Port)
+
 	return *listener, nil
 }
 
